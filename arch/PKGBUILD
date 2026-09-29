@@ -1,3 +1,4 @@
+# Maintainer: Iulian Mandache <25257851+iul1an@users.noreply.github.com>
 # Builds from this checkout: run makepkg in arch/, next to ../src and ../dkms.conf.
 pkgname=asus-ec-sensors-btf-dkms
 _modname=asus-ec-sensors-btf
