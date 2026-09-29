@@ -1,0 +1,248 @@
+diff --git a/upstream/asus-ec-sensors.c b/src/asus-ec-sensors-btf.c
+index 01a022b..f15ac88 100644
+--- a/upstream/asus-ec-sensors.c
++++ b/src/asus-ec-sensors-btf.c
+@@ -19,6 +19,7 @@
+  * - Water Flow fan RPM
+  * - CPU current
+  * - CPU core voltage
++ * - GC-HPWR (BTF slot power connector) per-pin current
+  */
+ 
+ #include <linux/acpi.h>
+@@ -40,6 +41,8 @@ static char *mutex_path_override;
+ 
+ /* Writing to this EC register switches EC bank */
+ #define ASUS_EC_BANK_REGISTER	0xff
++/* In bank 0, writing a channel here selects which GC-HPWR pin 0xd9..0xda reads */
++#define ASUS_EC_GC_HPWR_SELECT_REGISTER	0xd8
+ #define SENSOR_LABEL_LEN	16
+ 
+ /*
+@@ -155,8 +158,17 @@ enum ec_sensors {
+ 	ec_sensor_temp_sensor_extra_2,
+ 	/* "Extra_3" temperature sensor reading [℃] */
+ 	ec_sensor_temp_sensor_extra_3,
++	/* GC-HPWR pins 1 to 6, EC channels 0 to 5, in this order [mA] */
++	ec_sensor_curr_gc_hpwr_1,
++	ec_sensor_curr_gc_hpwr_2,
++	ec_sensor_curr_gc_hpwr_3,
++	ec_sensor_curr_gc_hpwr_4,
++	ec_sensor_curr_gc_hpwr_5,
++	ec_sensor_curr_gc_hpwr_6,
+ };
+ 
++static_assert(ec_sensor_curr_gc_hpwr_6 < BITS_PER_LONG);
++
+ #define SENSOR_TEMP_CHIPSET BIT(ec_sensor_temp_chipset)
+ #define SENSOR_TEMP_CPU BIT(ec_sensor_temp_cpu)
+ #define SENSOR_TEMP_CPU_PACKAGE BIT(ec_sensor_temp_cpu_package)
+@@ -184,6 +196,8 @@ enum ec_sensors {
+ #define SENSOR_TEMP_SENSOR_EXTRA_1 BIT(ec_sensor_temp_sensor_extra_1)
+ #define SENSOR_TEMP_SENSOR_EXTRA_2 BIT(ec_sensor_temp_sensor_extra_2)
+ #define SENSOR_TEMP_SENSOR_EXTRA_3 BIT(ec_sensor_temp_sensor_extra_3)
++#define SENSOR_SET_CURR_GC_HPWR \
++	GENMASK(ec_sensor_curr_gc_hpwr_6, ec_sensor_curr_gc_hpwr_1)
+ 
+ enum board_family {
+ 	family_unknown,
+@@ -304,6 +318,18 @@ static const struct ec_sensor_info sensors_family_amd_800[] = {
+ 		EC_SENSOR("T_Sensor", hwmon_temp, 1, 0x00, 0x36),
+ 	[ec_sensor_fan_cpu_opt] =
+ 		EC_SENSOR("CPU_Opt", hwmon_fan, 2, 0x00, 0xb0),
++	[ec_sensor_curr_gc_hpwr_1] =
++		EC_SENSOR("GC-HPWR pin 1", hwmon_curr, 2, 0x00, 0xd9),
++	[ec_sensor_curr_gc_hpwr_2] =
++		EC_SENSOR("GC-HPWR pin 2", hwmon_curr, 2, 0x00, 0xd9),
++	[ec_sensor_curr_gc_hpwr_3] =
++		EC_SENSOR("GC-HPWR pin 3", hwmon_curr, 2, 0x00, 0xd9),
++	[ec_sensor_curr_gc_hpwr_4] =
++		EC_SENSOR("GC-HPWR pin 4", hwmon_curr, 2, 0x00, 0xd9),
++	[ec_sensor_curr_gc_hpwr_5] =
++		EC_SENSOR("GC-HPWR pin 5", hwmon_curr, 2, 0x00, 0xd9),
++	[ec_sensor_curr_gc_hpwr_6] =
++		EC_SENSOR("GC-HPWR pin 6", hwmon_curr, 2, 0x00, 0xd9),
+ };
+ 
+ static const struct ec_sensor_info sensors_family_amd_trx_50[] = {
+@@ -840,7 +866,7 @@ static const struct ec_board_info board_info_zenith_ii_extreme = {
+ 		.driver_data = (void *)board_info,                              \
+ 	}
+ 
+-static const struct dmi_system_id dmi_table[] = {
++static const struct dmi_system_id dmi_table[] __maybe_unused = {
+ 	DMI_EXACT_MATCH_ASUS_BOARD_NAME("MAXIMUS VI HERO",
+ 					&board_info_maximus_vi_hero),
+ 	DMI_EXACT_MATCH_ASUS_BOARD_NAME("PRIME X470-PRO",
+@@ -954,6 +980,23 @@ static const struct dmi_system_id dmi_table[] = {
+ 	{},
+ };
+ 
++/* The CROSSHAIR X870E HERO's sensors (upstream after v7.2) and the BTF slot's pins */
++static const struct ec_board_info board_info_crosshair_x870e_hero_btf = {
++	.sensors = SENSOR_TEMP_CPU | SENSOR_TEMP_CPU_PACKAGE |
++		SENSOR_TEMP_MB | SENSOR_TEMP_VRM |
++		SENSOR_TEMP_T_SENSOR | SENSOR_FAN_CPU_OPT |
++		SENSOR_SET_CURR_GC_HPWR,
++	.mutex_path = ASUS_HW_ACCESS_MUTEX_SB_PCI0_SBRG_SIO1_MUT0,
++	.family = family_amd_800_series,
++};
++
++/* The only board this module binds to, so it never overlaps the in-tree one */
++static const struct dmi_system_id dmi_table_btf[] = {
++	DMI_EXACT_MATCH_ASUS_BOARD_NAME("ROG CROSSHAIR X870E HERO BTF",
++					&board_info_crosshair_x870e_hero_btf),
++	{},
++};
++
+ struct ec_sensor {
+ 	unsigned int info_index;
+ 	s32 cached_value;
+@@ -1005,6 +1048,8 @@ struct ec_sensors_data {
+ 	struct ec_sensor *sensors;
+ 	/* EC registers to read from */
+ 	u16 *registers;
++	/* GC-HPWR channel to select before reading each register, or -1 */
++	s8 *selects;
+ 	u8 *read_buffer;
+ 	/* sorted list of unique register banks */
+ 	u8 banks[ASUS_EC_MAX_BANK + 1];
+@@ -1041,6 +1086,11 @@ static bool is_sensor_data_signed(const struct ec_sensor_info *si)
+ 	return si->type == hwmon_temp;
+ }
+ 
++static bool is_gc_hpwr_sensor(unsigned int info_index)
++{
++	return BIT(info_index) & SENSOR_SET_CURR_GC_HPWR;
++}
++
+ static const struct ec_sensor_info *
+ get_sensor_info(const struct ec_sensors_data *state, int index)
+ {
+@@ -1110,6 +1160,11 @@ static void fill_ec_registers(struct ec_sensors_data *ec)
+ 			ec->registers[register_idx] =
+ 				(si->addr.components.bank << 8) +
+ 				si->addr.components.index + j;
++			ec->selects[register_idx] = -1;
++			if (!j && is_gc_hpwr_sensor(ec->sensors[i].info_index))
++				ec->selects[register_idx] =
++					ec->sensors[i].info_index -
++					ec_sensor_curr_gc_hpwr_1;
+ 		}
+ 	}
+ }
+@@ -1158,6 +1213,30 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
+ 	return ec_write(ASUS_EC_BANK_REGISTER, bank);
+ }
+ 
++/* Select a GC-HPWR channel, read its two data registers, check the select held */
++static int asus_ec_gc_hpwr_read(const struct device *dev,
++				struct ec_sensors_data *ec, int ireg)
++{
++	u8 channel = ec->selects[ireg];
++	u8 readback;
++
++	if (ec_write(ASUS_EC_GC_HPWR_SELECT_REGISTER, channel)) {
++		dev_warn(dev, "EC GC-HPWR channel select failed");
++		return -EIO;
++	}
++	ec_read(register_index(ec->registers[ireg]), ec->read_buffer + ireg);
++	ec_read(register_index(ec->registers[ireg + 1]),
++		ec->read_buffer + ireg + 1);
++	if (ec_read(ASUS_EC_GC_HPWR_SELECT_REGISTER, &readback) ||
++	    readback != channel) {
++		dev_warn_ratelimited(dev,
++				     "EC GC-HPWR channel %u changed during the read",
++				     channel);
++		return -EIO;
++	}
++	return 0;
++}
++
+ static int asus_ec_block_read(const struct device *dev,
+ 			      struct ec_sensors_data *ec)
+ {
+@@ -1192,6 +1271,16 @@ static int asus_ec_block_read(const struct device *dev,
+ 			if (reg_bank != bank) {
+ 				continue;
+ 			}
++			if (ec->selects[ireg] >= 0) {
++				status = asus_ec_gc_hpwr_read(dev, ec, ireg);
++				if (status) {
++					asus_ec_bank_switch(prev_bank, NULL);
++					return status;
++				}
++				/* both registers of the pin are read */
++				ireg++;
++				continue;
++			}
+ 			ec_read(register_index(ec->registers[ireg]),
+ 				ec->read_buffer + ireg);
+ 		}
+@@ -1308,12 +1397,20 @@ static int asus_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
+ 	}
+ 
+ 	ret = get_cached_value_or_update(dev, sidx, state, &value);
+-	if (!ret) {
+-		*val = scale_sensor_value(value,
+-					  get_sensor_info(state, sidx)->type);
++	if (ret)
++		return ret;
++
++	if (is_gc_hpwr_sensor(state->sensors[sidx].info_index)) {
++		/* ASUS's helper treats 0xfff8 and up as no reading */
++		if (value >= 0xfff8)
++			return -ENODATA;
++		/* already in mA */
++		*val = value;
++		return 0;
+ 	}
+ 
+-	return ret;
++	*val = scale_sensor_value(value, get_sensor_info(state, sidx)->type);
++	return 0;
+ }
+ 
+ static int asus_ec_hwmon_read_string(struct device *dev,
+@@ -1373,7 +1470,7 @@ static const struct ec_board_info *get_board_info(void)
+ {
+ 	const struct dmi_system_id *dmi_entry;
+ 
+-	dmi_entry = dmi_first_match(dmi_table);
++	dmi_entry = dmi_first_match(dmi_table_btf);
+ 	return dmi_entry ? dmi_entry->driver_data : NULL;
+ }
+ 
+@@ -1462,8 +1559,10 @@ static int asus_ec_probe(struct platform_device *pdev)
+ 					  sizeof(u16), GFP_KERNEL);
+ 	ec_data->read_buffer = devm_kcalloc(dev, ec_data->nr_registers,
+ 					    sizeof(u8), GFP_KERNEL);
++	ec_data->selects = devm_kcalloc(dev, ec_data->nr_registers,
++					sizeof(s8), GFP_KERNEL);
+ 
+-	if (!ec_data->registers || !ec_data->read_buffer)
++	if (!ec_data->registers || !ec_data->read_buffer || !ec_data->selects)
+ 		return -ENOMEM;
+ 
+ 	fill_ec_registers(ec_data);
+@@ -1512,11 +1611,11 @@ static int asus_ec_probe(struct platform_device *pdev)
+ 	return PTR_ERR_OR_ZERO(hwdev);
+ }
+ 
+-MODULE_DEVICE_TABLE(dmi, dmi_table);
++MODULE_DEVICE_TABLE(dmi, dmi_table_btf);
+ 
+ static struct platform_driver asus_ec_sensors_platform_driver = {
+ 	.driver = {
+-		.name	= "asus-ec-sensors",
++		.name	= "asus-ec-sensors-btf",
+ 	},
+ 	.probe = asus_ec_probe,
+ };
+@@ -1550,5 +1649,5 @@ MODULE_PARM_DESC(mutex_path,
+ 
+ MODULE_AUTHOR("Eugene Shalygin <eugene.shalygin@gmail.com>");
+ MODULE_DESCRIPTION(
+-	"HWMON driver for sensors accessible via ACPI EC in ASUS motherboards");
++	"HWMON driver for sensors accessible via ACPI EC in ASUS motherboards, ROG CROSSHAIR X870E HERO BTF fork with GC-HPWR pin currents");
+ MODULE_LICENSE("GPL");
