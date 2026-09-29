@@ -8,13 +8,13 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container: archlinux:latest
     steps:
       - name: Install the current kernel headers and the toolchain
         run: pacman -Syu --noconfirm --needed base-devel linux-headers git perl
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build the module with warnings as errors
         run: |
