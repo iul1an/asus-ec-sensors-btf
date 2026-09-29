@@ -1,5 +1,7 @@
 # asus-ec-sensors-btf
 
+![build](https://github.com/iul1an/asus-ec-sensors-btf/actions/workflows/build.yml/badge.svg)
+
 The Linux hwmon driver `asus-ec-sensors`, as the module `asus_ec_sensors_btf`,
 for the ASUS ROG CROSSHAIR X870E HERO BTF: its EC sensors plus the current on
 each of the six 12 V pins of the GC-HPWR connector of the BTF graphics slot.

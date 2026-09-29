@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install the current kernel headers and the toolchain
+        run: pacman -Syu --noconfirm --needed base-devel linux-headers git perl
+
+      - uses: actions/checkout@v4
+
+      - name: Build the module with warnings as errors
+        run: |
+          KDIR=$(ls -d /usr/lib/modules/*/build | head -1)
+          echo "headers: $KDIR"
+          make KDIR="$KDIR" modules KCFLAGS=-Werror W=1
+
+      - name: Check the patch
+        run: |
+          KDIR=$(ls -d /usr/lib/modules/*/build | head -1)
+          "$KDIR/scripts/checkpatch.pl" --no-tree --strict --no-signoff - < patch/0001-btf-gc-hpwr.patch
+
+      - name: The patch reproduces the source
+        run: |
+          patch -o /tmp/from-patch.c upstream/asus-ec-sensors.c < patch/0001-btf-gc-hpwr.patch
+          cmp /tmp/from-patch.c src/asus-ec-sensors-btf.c
