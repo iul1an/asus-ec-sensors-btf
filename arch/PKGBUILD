@@ -1,0 +1,26 @@
+# Builds from this checkout: run makepkg in arch/, next to ../src and ../dkms.conf.
+pkgname=asus-ec-sensors-btf-dkms
+_modname=asus-ec-sensors-btf
+# One version for the repo, in ../VERSION; dkms.conf must match it.
+pkgver=$(<"$startdir/../VERSION")
+pkgrel=1
+pkgdesc='hwmon driver for the ASUS EC sensors of the ROG CROSSHAIR X870E HERO BTF, with the GC-HPWR per-pin currents (DKMS)'
+arch=('x86_64')
+url='https://github.com/iul1an/asus-ec-sensors-btf'
+license=('GPL-2.0-or-later')
+depends=('dkms')
+
+package() {
+	local top="$startdir/.."
+	local dest="$pkgdir/usr/src/$_modname-$pkgver"
+
+	grep -qx "PACKAGE_VERSION=\"$pkgver\"" "$top/dkms.conf" || {
+		error "dkms.conf's PACKAGE_VERSION is not $pkgver from VERSION"
+		return 1
+	}
+
+	install -Dm644 "$top/dkms.conf" "$dest/dkms.conf"
+	install -Dm644 "$top/src/Makefile" "$dest/Makefile"
+	install -Dm644 "$top/src/$_modname.c" "$dest/$_modname.c"
+	install -Dm644 "$top/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
