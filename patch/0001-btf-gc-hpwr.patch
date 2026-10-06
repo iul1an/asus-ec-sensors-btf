@@ -1,5 +1,5 @@
 diff --git a/upstream/asus-ec-sensors.c b/src/asus-ec-sensors-btf.c
-index 01a022b..f15ac88 100644
+index 01a022b..8f373e8 100644
 --- a/upstream/asus-ec-sensors.c
 +++ b/src/asus-ec-sensors-btf.c
 @@ -19,6 +19,7 @@
@@ -74,7 +74,7 @@ index 01a022b..f15ac88 100644
  	DMI_EXACT_MATCH_ASUS_BOARD_NAME("MAXIMUS VI HERO",
  					&board_info_maximus_vi_hero),
  	DMI_EXACT_MATCH_ASUS_BOARD_NAME("PRIME X470-PRO",
-@@ -954,6 +980,23 @@ static const struct dmi_system_id dmi_table[] = {
+@@ -954,6 +980,27 @@ static const struct dmi_system_id dmi_table[] = {
  	{},
  };
  
@@ -84,7 +84,11 @@ index 01a022b..f15ac88 100644
 +		SENSOR_TEMP_MB | SENSOR_TEMP_VRM |
 +		SENSOR_TEMP_T_SENSOR | SENSOR_FAN_CPU_OPT |
 +		SENSOR_SET_CURR_GC_HPWR,
-+	.mutex_path = ASUS_HW_ACCESS_MUTEX_SB_PCI0_SBRG_SIO1_MUT0,
++	/*
++	 * The firmware's EC query handlers switch banks under the global lock;
++	 * SIO1.MUT0 only guards the Super I/O.
++	 */
++	.mutex_path = ACPI_GLOBAL_LOCK_PSEUDO_PATH,
 +	.family = family_amd_800_series,
 +};
 +
@@ -98,7 +102,7 @@ index 01a022b..f15ac88 100644
  struct ec_sensor {
  	unsigned int info_index;
  	s32 cached_value;
-@@ -1005,6 +1048,8 @@ struct ec_sensors_data {
+@@ -1005,11 +1052,15 @@ struct ec_sensors_data {
  	struct ec_sensor *sensors;
  	/* EC registers to read from */
  	u16 *registers;
@@ -107,7 +111,23 @@ index 01a022b..f15ac88 100644
  	u8 *read_buffer;
  	/* sorted list of unique register banks */
  	u8 banks[ASUS_EC_MAX_BANK + 1];
-@@ -1041,6 +1086,11 @@ static bool is_sensor_data_signed(const struct ec_sensor_info *si)
+ 	/* in jiffies */
+ 	u64 next_update;
++	/* result of the last update, served until the next one */
++	int update_status;
+ 	struct lock_data lock_data;
+ 	/* number of board EC sensors */
+ 	u8 nr_sensors;
+@@ -1020,6 +1071,8 @@ struct ec_sensors_data {
+ 	u8 nr_registers;
+ 	/* number of unique register banks */
+ 	u8 nr_banks;
++	/* last non-zero bank warned about, 0 after a clean read */
++	u8 warned_bank;
+ };
+ 
+ static u8 register_bank(u16 reg)
+@@ -1041,6 +1094,11 @@ static bool is_sensor_data_signed(const struct ec_sensor_info *si)
  	return si->type == hwmon_temp;
  }
  
@@ -119,7 +139,7 @@ index 01a022b..f15ac88 100644
  static const struct ec_sensor_info *
  get_sensor_info(const struct ec_sensors_data *state, int index)
  {
-@@ -1110,6 +1160,11 @@ static void fill_ec_registers(struct ec_sensors_data *ec)
+@@ -1110,6 +1168,11 @@ static void fill_ec_registers(struct ec_sensors_data *ec)
  			ec->registers[register_idx] =
  				(si->addr.components.bank << 8) +
  				si->addr.components.index + j;
@@ -131,7 +151,15 @@ index 01a022b..f15ac88 100644
  		}
  	}
  }
-@@ -1158,6 +1213,30 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
+@@ -1143,6 +1206,7 @@ static int setup_lock_data(struct device *dev)
+ 		state->lock_data.lock = lock_via_acpi_mutex;
+ 		state->lock_data.unlock = unlock_acpi_mutex;
+ 	}
++	dev_info(dev, "EC access guarded by %s", mutex_path);
+ 	return 0;
+ }
+ 
+@@ -1158,6 +1222,35 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
  	return ec_write(ASUS_EC_BANK_REGISTER, bank);
  }
  
@@ -146,9 +174,14 @@ index 01a022b..f15ac88 100644
 +		dev_warn(dev, "EC GC-HPWR channel select failed");
 +		return -EIO;
 +	}
-+	ec_read(register_index(ec->registers[ireg]), ec->read_buffer + ireg);
-+	ec_read(register_index(ec->registers[ireg + 1]),
-+		ec->read_buffer + ireg + 1);
++	if (ec_read(register_index(ec->registers[ireg]),
++		    ec->read_buffer + ireg) ||
++	    ec_read(register_index(ec->registers[ireg + 1]),
++		    ec->read_buffer + ireg + 1)) {
++		dev_warn_ratelimited(dev, "EC GC-HPWR channel %u data read failed",
++				     channel);
++		return -EIO;
++	}
 +	if (ec_read(ASUS_EC_GC_HPWR_SELECT_REGISTER, &readback) ||
 +	    readback != channel) {
 +		dev_warn_ratelimited(dev,
@@ -162,24 +195,89 @@ index 01a022b..f15ac88 100644
  static int asus_ec_block_read(const struct device *dev,
  			      struct ec_sensors_data *ec)
  {
-@@ -1192,6 +1271,16 @@ static int asus_ec_block_read(const struct device *dev,
+@@ -1171,10 +1264,15 @@ static int asus_ec_block_read(const struct device *dev,
+ 		return status;
+ 	}
+ 
+-	if (prev_bank) {
+-		/* oops... somebody else is working with the EC too */
+-		dev_warn(dev,
+-			"Concurrent access to the ACPI EC detected.\nRace condition possible.");
++	if (prev_bank != ec->warned_bank) {
++		if (prev_bank)
++			/* oops... somebody else is working with the EC too */
++			dev_warn(dev,
++				 "Concurrent access to the ACPI EC detected, bank %u.\nRace condition possible.",
++				 prev_bank);
++		else
++			dev_notice(dev, "EC back on bank 0");
++		ec->warned_bank = prev_bank;
+ 	}
+ 
+ 	/* read registers minimizing bank switches. */
+@@ -1184,7 +1282,8 @@ static int asus_ec_block_read(const struct device *dev,
+ 			if (asus_ec_bank_switch(bank, NULL)) {
+ 				dev_warn(dev, "EC bank switch to %d failed",
+ 					 bank);
+-				break;
++				status = -EIO;
++				goto restore_bank;
+ 			}
+ 		}
+ 		for (ireg = 0; ireg < ec->nr_registers; ireg++) {
+@@ -1192,13 +1291,31 @@ static int asus_ec_block_read(const struct device *dev,
  			if (reg_bank != bank) {
  				continue;
  			}
+-			ec_read(register_index(ec->registers[ireg]),
+-				ec->read_buffer + ireg);
 +			if (ec->selects[ireg] >= 0) {
 +				status = asus_ec_gc_hpwr_read(dev, ec, ireg);
-+				if (status) {
-+					asus_ec_bank_switch(prev_bank, NULL);
-+					return status;
-+				}
++				if (status)
++					goto restore_bank;
 +				/* both registers of the pin are read */
 +				ireg++;
 +				continue;
 +			}
- 			ec_read(register_index(ec->registers[ireg]),
- 				ec->read_buffer + ireg);
++			if (ec_read(register_index(ec->registers[ireg]),
++				    ec->read_buffer + ireg)) {
++				dev_warn_ratelimited(dev,
++						     "EC register 0x%02x read failed",
++						     register_index(ec->registers[ireg]));
++				status = -EIO;
++				goto restore_bank;
++			}
  		}
-@@ -1308,12 +1397,20 @@ static int asus_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
+ 	}
+ 
+ 	status = asus_ec_bank_switch(prev_bank, NULL);
+ 	return status;
++
++restore_bank:
++	asus_ec_bank_switch(prev_bank, NULL);
++	return status;
+ }
+ 
+ static inline s32 get_sensor_value(const struct ec_sensor_info *si, u8 *data)
+@@ -1279,12 +1396,13 @@ static int get_cached_value_or_update(const struct device *dev,
+ 				      struct ec_sensors_data *state, s32 *value)
+ {
+ 	if (time_after64(get_jiffies_64(), state->next_update)) {
+-		if (update_ec_sensors(dev, state)) {
+-			dev_err(dev, "update_ec_sensors() failure\n");
+-			return -EIO;
+-		}
++		state->update_status = update_ec_sensors(dev, state);
++		if (state->update_status)
++			dev_err_ratelimited(dev, "update_ec_sensors() failure\n");
+ 		state->next_update = get_jiffies_64() + HZ;
+ 	}
++	if (state->update_status)
++		return -EIO;
+ 
+ 	*value = state->sensors[sensor_index].cached_value;
+ 	return 0;
+@@ -1308,12 +1426,20 @@ static int asus_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
  	}
  
  	ret = get_cached_value_or_update(dev, sidx, state, &value);
@@ -204,7 +302,7 @@ index 01a022b..f15ac88 100644
  }
  
  static int asus_ec_hwmon_read_string(struct device *dev,
-@@ -1373,7 +1470,7 @@ static const struct ec_board_info *get_board_info(void)
+@@ -1373,7 +1499,7 @@ static const struct ec_board_info *get_board_info(void)
  {
  	const struct dmi_system_id *dmi_entry;
  
@@ -213,7 +311,7 @@ index 01a022b..f15ac88 100644
  	return dmi_entry ? dmi_entry->driver_data : NULL;
  }
  
-@@ -1462,8 +1559,10 @@ static int asus_ec_probe(struct platform_device *pdev)
+@@ -1462,8 +1588,10 @@ static int asus_ec_probe(struct platform_device *pdev)
  					  sizeof(u16), GFP_KERNEL);
  	ec_data->read_buffer = devm_kcalloc(dev, ec_data->nr_registers,
  					    sizeof(u8), GFP_KERNEL);
@@ -225,7 +323,7 @@ index 01a022b..f15ac88 100644
  		return -ENOMEM;
  
  	fill_ec_registers(ec_data);
-@@ -1512,11 +1611,11 @@ static int asus_ec_probe(struct platform_device *pdev)
+@@ -1512,11 +1640,11 @@ static int asus_ec_probe(struct platform_device *pdev)
  	return PTR_ERR_OR_ZERO(hwdev);
  }
  
@@ -239,7 +337,7 @@ index 01a022b..f15ac88 100644
  	},
  	.probe = asus_ec_probe,
  };
-@@ -1550,5 +1649,5 @@ MODULE_PARM_DESC(mutex_path,
+@@ -1550,5 +1678,5 @@ MODULE_PARM_DESC(mutex_path,
  
  MODULE_AUTHOR("Eugene Shalygin <eugene.shalygin@gmail.com>");
  MODULE_DESCRIPTION(

@@ -986,7 +986,11 @@ static const struct ec_board_info board_info_crosshair_x870e_hero_btf = {
 		SENSOR_TEMP_MB | SENSOR_TEMP_VRM |
 		SENSOR_TEMP_T_SENSOR | SENSOR_FAN_CPU_OPT |
 		SENSOR_SET_CURR_GC_HPWR,
-	.mutex_path = ASUS_HW_ACCESS_MUTEX_SB_PCI0_SBRG_SIO1_MUT0,
+	/*
+	 * The firmware's EC query handlers switch banks under the global lock;
+	 * SIO1.MUT0 only guards the Super I/O.
+	 */
+	.mutex_path = ACPI_GLOBAL_LOCK_PSEUDO_PATH,
 	.family = family_amd_800_series,
 };
 
@@ -1055,6 +1059,8 @@ struct ec_sensors_data {
 	u8 banks[ASUS_EC_MAX_BANK + 1];
 	/* in jiffies */
 	u64 next_update;
+	/* result of the last update, served until the next one */
+	int update_status;
 	struct lock_data lock_data;
 	/* number of board EC sensors */
 	u8 nr_sensors;
@@ -1065,6 +1071,8 @@ struct ec_sensors_data {
 	u8 nr_registers;
 	/* number of unique register banks */
 	u8 nr_banks;
+	/* last non-zero bank warned about, 0 after a clean read */
+	u8 warned_bank;
 };
 
 static u8 register_bank(u16 reg)
@@ -1198,6 +1206,7 @@ static int setup_lock_data(struct device *dev)
 		state->lock_data.lock = lock_via_acpi_mutex;
 		state->lock_data.unlock = unlock_acpi_mutex;
 	}
+	dev_info(dev, "EC access guarded by %s", mutex_path);
 	return 0;
 }
 
@@ -1224,9 +1233,14 @@ static int asus_ec_gc_hpwr_read(const struct device *dev,
 		dev_warn(dev, "EC GC-HPWR channel select failed");
 		return -EIO;
 	}
-	ec_read(register_index(ec->registers[ireg]), ec->read_buffer + ireg);
-	ec_read(register_index(ec->registers[ireg + 1]),
-		ec->read_buffer + ireg + 1);
+	if (ec_read(register_index(ec->registers[ireg]),
+		    ec->read_buffer + ireg) ||
+	    ec_read(register_index(ec->registers[ireg + 1]),
+		    ec->read_buffer + ireg + 1)) {
+		dev_warn_ratelimited(dev, "EC GC-HPWR channel %u data read failed",
+				     channel);
+		return -EIO;
+	}
 	if (ec_read(ASUS_EC_GC_HPWR_SELECT_REGISTER, &readback) ||
 	    readback != channel) {
 		dev_warn_ratelimited(dev,
@@ -1250,10 +1264,15 @@ static int asus_ec_block_read(const struct device *dev,
 		return status;
 	}
 
-	if (prev_bank) {
-		/* oops... somebody else is working with the EC too */
-		dev_warn(dev,
-			"Concurrent access to the ACPI EC detected.\nRace condition possible.");
+	if (prev_bank != ec->warned_bank) {
+		if (prev_bank)
+			/* oops... somebody else is working with the EC too */
+			dev_warn(dev,
+				 "Concurrent access to the ACPI EC detected, bank %u.\nRace condition possible.",
+				 prev_bank);
+		else
+			dev_notice(dev, "EC back on bank 0");
+		ec->warned_bank = prev_bank;
 	}
 
 	/* read registers minimizing bank switches. */
@@ -1263,7 +1282,8 @@ static int asus_ec_block_read(const struct device *dev,
 			if (asus_ec_bank_switch(bank, NULL)) {
 				dev_warn(dev, "EC bank switch to %d failed",
 					 bank);
-				break;
+				status = -EIO;
+				goto restore_bank;
 			}
 		}
 		for (ireg = 0; ireg < ec->nr_registers; ireg++) {
@@ -1273,20 +1293,28 @@ static int asus_ec_block_read(const struct device *dev,
 			}
 			if (ec->selects[ireg] >= 0) {
 				status = asus_ec_gc_hpwr_read(dev, ec, ireg);
-				if (status) {
-					asus_ec_bank_switch(prev_bank, NULL);
-					return status;
-				}
+				if (status)
+					goto restore_bank;
 				/* both registers of the pin are read */
 				ireg++;
 				continue;
 			}
-			ec_read(register_index(ec->registers[ireg]),
-				ec->read_buffer + ireg);
+			if (ec_read(register_index(ec->registers[ireg]),
+				    ec->read_buffer + ireg)) {
+				dev_warn_ratelimited(dev,
+						     "EC register 0x%02x read failed",
+						     register_index(ec->registers[ireg]));
+				status = -EIO;
+				goto restore_bank;
+			}
 		}
 	}
 
 	status = asus_ec_bank_switch(prev_bank, NULL);
+	return status;
+
+restore_bank:
+	asus_ec_bank_switch(prev_bank, NULL);
 	return status;
 }
 
@@ -1368,12 +1396,13 @@ static int get_cached_value_or_update(const struct device *dev,
 				      struct ec_sensors_data *state, s32 *value)
 {
 	if (time_after64(get_jiffies_64(), state->next_update)) {
-		if (update_ec_sensors(dev, state)) {
-			dev_err(dev, "update_ec_sensors() failure\n");
-			return -EIO;
-		}
+		state->update_status = update_ec_sensors(dev, state);
+		if (state->update_status)
+			dev_err_ratelimited(dev, "update_ec_sensors() failure\n");
 		state->next_update = get_jiffies_64() + HZ;
 	}
+	if (state->update_status)
+		return -EIO;
 
 	*value = state->sensors[sensor_index].cached_value;
 	return 0;

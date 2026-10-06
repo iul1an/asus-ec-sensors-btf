@@ -17,8 +17,16 @@ each of the six 12 V pins of the GC-HPWR connector of the BTF graphics slot.
 A pin's current is a big-endian 16-bit value in mA; 0xfff8 and above
 means no reading and gives `ENODATA`. After each read the driver reads
 0xd8 back, and if another EC user changed the channel the whole update
-fails with `EIO`. All reads run under the EC's ACPI mutex, at most once
-a second.
+fails with `EIO`. All reads run under the ACPI global lock, at most once
+a second; the event handlers of this board's firmware hold the same
+lock around their EC bank switches. The kernel log names the guard when
+the module loads. A failed EC read stops the update at once, and every
+sensor then returns `EIO` until an update succeeds again; the driver
+tries again at most once a second.
+
+The EC bank found before a read is restored after it. A bank other
+than 0 is reported once in the kernel log with its value, and again
+whenever it changes, and once more when the EC is back on bank 0.
 
 ## Build
 
@@ -32,12 +40,12 @@ Needs the running kernel's headers (`linux-headers` on Arch).
 Arch package, which DKMS builds for every installed kernel:
 
     make package
-    sudo pacman -U dist/asus-ec-sensors-btf-dkms-0.1.0-1-x86_64.pkg.tar.zst
+    sudo pacman -U dist/asus-ec-sensors-btf-dkms-0.1.1-1-x86_64.pkg.tar.zst
 
 DKMS by hand:
 
-    sudo install -Dm644 -t /usr/src/asus-ec-sensors-btf-0.1.0 dkms.conf src/Makefile src/asus-ec-sensors-btf.c
-    sudo dkms install asus-ec-sensors-btf/0.1.0
+    sudo install -Dm644 -t /usr/src/asus-ec-sensors-btf-0.1.1 dkms.conf src/Makefile src/asus-ec-sensors-btf.c
+    sudo dkms install asus-ec-sensors-btf/0.1.1
 
 The module loads at boot through the board's DMI alias. To load it now
 and check it:
