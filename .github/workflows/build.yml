@@ -6,6 +6,9 @@ on:
   schedule:
     - cron: "17 6 * * 1"
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-26.04
@@ -31,3 +34,9 @@ jobs:
         run: |
           patch -o /tmp/from-patch.c upstream/asus-ec-sensors.c < patch/0001-btf-gc-hpwr.patch
           cmp /tmp/from-patch.c src/asus-ec-sensors-btf.c
+
+      - name: The upstream copy matches the current kernel's driver
+        run: |
+          KVER=$(pacman -Q linux-headers | awk '{print $2}' | sed 's/\.arch.*//')
+          echo "kernel: $KVER"
+          make drift KVER="$KVER"

@@ -35,6 +35,11 @@ Needs the running kernel's headers (`linux-headers` on Arch).
     make
     make checkpatch
 
+`make drift` compares `upstream/asus-ec-sensors.c` with the kernel's own
+driver for the running kernel, or for the one given as `KVER=7.2.8`. CI runs
+it weekly against Arch's current kernel; a red run means the fork needs a
+rebase.
+
 ## Install
 
 Arch package, which DKMS builds for every installed kernel:
