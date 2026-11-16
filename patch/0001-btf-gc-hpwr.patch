@@ -1,5 +1,5 @@
 diff --git a/upstream/asus-ec-sensors.c b/src/asus-ec-sensors-btf.c
-index 01a022b..8f373e8 100644
+index e43645e..7e59211 100644
 --- a/upstream/asus-ec-sensors.c
 +++ b/src/asus-ec-sensors-btf.c
 @@ -19,6 +19,7 @@
@@ -44,9 +44,9 @@ index 01a022b..8f373e8 100644
 +#define SENSOR_SET_CURR_GC_HPWR \
 +	GENMASK(ec_sensor_curr_gc_hpwr_6, ec_sensor_curr_gc_hpwr_1)
  
- enum board_family {
- 	family_unknown,
-@@ -304,6 +318,18 @@ static const struct ec_sensor_info sensors_family_amd_800[] = {
+ /*
+  * The values for temperature sensor readings without physical sensors connected.
+@@ -318,6 +332,18 @@ static const struct ec_sensor_info sensors_family_amd_800[] = {
  		EC_SENSOR("T_Sensor", hwmon_temp, 1, 0x00, 0x36),
  	[ec_sensor_fan_cpu_opt] =
  		EC_SENSOR("CPU_Opt", hwmon_fan, 2, 0x00, 0xb0),
@@ -65,7 +65,7 @@ index 01a022b..8f373e8 100644
  };
  
  static const struct ec_sensor_info sensors_family_amd_trx_50[] = {
-@@ -840,7 +866,7 @@ static const struct ec_board_info board_info_zenith_ii_extreme = {
+@@ -879,7 +905,7 @@ static const struct ec_board_info board_info_zenith_ii_extreme = {
  		.driver_data = (void *)board_info,                              \
  	}
  
@@ -74,11 +74,11 @@ index 01a022b..8f373e8 100644
  	DMI_EXACT_MATCH_ASUS_BOARD_NAME("MAXIMUS VI HERO",
  					&board_info_maximus_vi_hero),
  	DMI_EXACT_MATCH_ASUS_BOARD_NAME("PRIME X470-PRO",
-@@ -954,6 +980,27 @@ static const struct dmi_system_id dmi_table[] = {
+@@ -1003,6 +1029,27 @@ static const struct dmi_system_id dmi_table[] = {
  	{},
  };
  
-+/* The CROSSHAIR X870E HERO's sensors (upstream after v7.2) and the BTF slot's pins */
++/* The sensors of board_info_crosshair_x870e_hero and the BTF slot's pins */
 +static const struct ec_board_info board_info_crosshair_x870e_hero_btf = {
 +	.sensors = SENSOR_TEMP_CPU | SENSOR_TEMP_CPU_PACKAGE |
 +		SENSOR_TEMP_MB | SENSOR_TEMP_VRM |
@@ -100,9 +100,9 @@ index 01a022b..8f373e8 100644
 +};
 +
  struct ec_sensor {
+ 	/* this is ec_sensors enum value */
  	unsigned int info_index;
- 	s32 cached_value;
-@@ -1005,11 +1052,15 @@ struct ec_sensors_data {
+@@ -1055,11 +1102,15 @@ struct ec_sensors_data {
  	struct ec_sensor *sensors;
  	/* EC registers to read from */
  	u16 *registers;
@@ -118,7 +118,7 @@ index 01a022b..8f373e8 100644
  	struct lock_data lock_data;
  	/* number of board EC sensors */
  	u8 nr_sensors;
-@@ -1020,6 +1071,8 @@ struct ec_sensors_data {
+@@ -1070,6 +1121,8 @@ struct ec_sensors_data {
  	u8 nr_registers;
  	/* number of unique register banks */
  	u8 nr_banks;
@@ -127,7 +127,7 @@ index 01a022b..8f373e8 100644
  };
  
  static u8 register_bank(u16 reg)
-@@ -1041,6 +1094,11 @@ static bool is_sensor_data_signed(const struct ec_sensor_info *si)
+@@ -1091,6 +1144,11 @@ static bool is_sensor_data_signed(const struct ec_sensor_info *si)
  	return si->type == hwmon_temp;
  }
  
@@ -139,7 +139,7 @@ index 01a022b..8f373e8 100644
  static const struct ec_sensor_info *
  get_sensor_info(const struct ec_sensors_data *state, int index)
  {
-@@ -1110,6 +1168,11 @@ static void fill_ec_registers(struct ec_sensors_data *ec)
+@@ -1166,6 +1224,11 @@ static void fill_ec_registers(struct ec_sensors_data *ec)
  			ec->registers[register_idx] =
  				(si->addr.components.bank << 8) +
  				si->addr.components.index + j;
@@ -151,7 +151,7 @@ index 01a022b..8f373e8 100644
  		}
  	}
  }
-@@ -1143,6 +1206,7 @@ static int setup_lock_data(struct device *dev)
+@@ -1199,6 +1262,7 @@ static int setup_lock_data(struct device *dev)
  		state->lock_data.lock = lock_via_acpi_mutex;
  		state->lock_data.unlock = unlock_acpi_mutex;
  	}
@@ -159,7 +159,7 @@ index 01a022b..8f373e8 100644
  	return 0;
  }
  
-@@ -1158,6 +1222,35 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
+@@ -1214,6 +1278,35 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
  	return ec_write(ASUS_EC_BANK_REGISTER, bank);
  }
  
@@ -195,7 +195,7 @@ index 01a022b..8f373e8 100644
  static int asus_ec_block_read(const struct device *dev,
  			      struct ec_sensors_data *ec)
  {
-@@ -1171,10 +1264,15 @@ static int asus_ec_block_read(const struct device *dev,
+@@ -1227,10 +1320,15 @@ static int asus_ec_block_read(const struct device *dev,
  		return status;
  	}
  
@@ -215,7 +215,7 @@ index 01a022b..8f373e8 100644
  	}
  
  	/* read registers minimizing bank switches. */
-@@ -1184,7 +1282,8 @@ static int asus_ec_block_read(const struct device *dev,
+@@ -1240,7 +1338,8 @@ static int asus_ec_block_read(const struct device *dev,
  			if (asus_ec_bank_switch(bank, NULL)) {
  				dev_warn(dev, "EC bank switch to %d failed",
  					 bank);
@@ -225,7 +225,7 @@ index 01a022b..8f373e8 100644
  			}
  		}
  		for (ireg = 0; ireg < ec->nr_registers; ireg++) {
-@@ -1192,13 +1291,31 @@ static int asus_ec_block_read(const struct device *dev,
+@@ -1248,13 +1347,31 @@ static int asus_ec_block_read(const struct device *dev,
  			if (reg_bank != bank) {
  				continue;
  			}
@@ -259,7 +259,7 @@ index 01a022b..8f373e8 100644
  }
  
  static inline s32 get_sensor_value(const struct ec_sensor_info *si, u8 *data)
-@@ -1279,12 +1396,13 @@ static int get_cached_value_or_update(const struct device *dev,
+@@ -1335,12 +1452,13 @@ static int get_cached_value_or_update(const struct device *dev,
  				      struct ec_sensors_data *state, s32 *value)
  {
  	if (time_after64(get_jiffies_64(), state->next_update)) {
@@ -277,16 +277,10 @@ index 01a022b..8f373e8 100644
  
  	*value = state->sensors[sensor_index].cached_value;
  	return 0;
-@@ -1308,12 +1426,20 @@ static int asus_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
- 	}
+@@ -1380,6 +1498,15 @@ static int asus_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
+ 	if (ret)
+ 		return ret;
  
- 	ret = get_cached_value_or_update(dev, sidx, state, &value);
--	if (!ret) {
--		*val = scale_sensor_value(value,
--					  get_sensor_info(state, sidx)->type);
-+	if (ret)
-+		return ret;
-+
 +	if (is_gc_hpwr_sensor(state->sensors[sidx].info_index)) {
 +		/* ASUS's helper treats 0xfff8 and up as no reading */
 +		if (value >= 0xfff8)
@@ -294,15 +288,12 @@ index 01a022b..8f373e8 100644
 +		/* already in mA */
 +		*val = value;
 +		return 0;
- 	}
- 
--	return ret;
-+	*val = scale_sensor_value(value, get_sensor_info(state, sidx)->type);
-+	return 0;
- }
- 
- static int asus_ec_hwmon_read_string(struct device *dev,
-@@ -1373,7 +1499,7 @@ static const struct ec_board_info *get_board_info(void)
++	}
++
+ 	sensor_info = get_sensor_info(state, sidx);
+ 	if (sensor_info->type == hwmon_temp) {
+ 		ec_sensor = get_ec_sensor_type(state, sidx);
+@@ -1449,7 +1576,7 @@ static const struct ec_board_info *get_board_info(void)
  {
  	const struct dmi_system_id *dmi_entry;
  
@@ -311,7 +302,7 @@ index 01a022b..8f373e8 100644
  	return dmi_entry ? dmi_entry->driver_data : NULL;
  }
  
-@@ -1462,8 +1588,10 @@ static int asus_ec_probe(struct platform_device *pdev)
+@@ -1538,8 +1665,10 @@ static int asus_ec_probe(struct platform_device *pdev)
  					  sizeof(u16), GFP_KERNEL);
  	ec_data->read_buffer = devm_kcalloc(dev, ec_data->nr_registers,
  					    sizeof(u8), GFP_KERNEL);
@@ -323,7 +314,7 @@ index 01a022b..8f373e8 100644
  		return -ENOMEM;
  
  	fill_ec_registers(ec_data);
-@@ -1512,11 +1640,11 @@ static int asus_ec_probe(struct platform_device *pdev)
+@@ -1588,11 +1717,11 @@ static int asus_ec_probe(struct platform_device *pdev)
  	return PTR_ERR_OR_ZERO(hwdev);
  }
  
@@ -337,7 +328,7 @@ index 01a022b..8f373e8 100644
  	},
  	.probe = asus_ec_probe,
  };
-@@ -1550,5 +1678,5 @@ MODULE_PARM_DESC(mutex_path,
+@@ -1626,5 +1755,5 @@ MODULE_PARM_DESC(mutex_path,
  
  MODULE_AUTHOR("Eugene Shalygin <eugene.shalygin@gmail.com>");
  MODULE_DESCRIPTION(

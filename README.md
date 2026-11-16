@@ -14,6 +14,9 @@ each of the six 12 V pins of the GC-HPWR connector of the BTF graphics slot.
 | fan1 | CPU_Opt | 0xb0..0xb1 |
 | curr1..curr6 | GC-HPWR pin 1..6 | write channel 0..5 to 0xd8, read 0xd9 (high), 0xda (low) |
 
+T_Sensor gives `ENODATA` when no probe is plugged in (a raw reading of
+-62, -60 or -40 °C), as upstream does since Linux 7.3.
+
 A pin's current is a big-endian 16-bit value in mA; 0xfff8 and above
 means no reading and gives `ENODATA`. After each read the driver reads
 0xd8 back, and if another EC user changed the channel the whole update
@@ -45,12 +48,12 @@ rebase.
 Arch package, which DKMS builds for every installed kernel:
 
     make package
-    sudo pacman -U dist/asus-ec-sensors-btf-dkms-0.1.1-1-x86_64.pkg.tar.zst
+    sudo pacman -U dist/asus-ec-sensors-btf-dkms-0.1.2-1-x86_64.pkg.tar.zst
 
 DKMS by hand:
 
-    sudo install -Dm644 -t /usr/src/asus-ec-sensors-btf-0.1.1 dkms.conf src/Makefile src/asus-ec-sensors-btf.c
-    sudo dkms install asus-ec-sensors-btf/0.1.1
+    sudo install -Dm644 -t /usr/src/asus-ec-sensors-btf-0.1.2 dkms.conf src/Makefile src/asus-ec-sensors-btf.c
+    sudo dkms install asus-ec-sensors-btf/0.1.2
 
 The module loads at boot through the board's DMI alias. To load it now
 and check it:
@@ -60,8 +63,8 @@ and check it:
 
 ## Refresh on a new kernel
 
-`upstream/asus-ec-sensors.c` is Linux v7.2.7's `drivers/hwmon/asus-ec-sensors.c`,
-SHA-256 `703ad556d01d3eb3c1eb9d14ed2eda283c88c84830ddb55be85d977540b20649`.
+`upstream/asus-ec-sensors.c` is Linux v7.3.4's `drivers/hwmon/asus-ec-sensors.c`,
+SHA-256 `3ecad5b8a99a05b036dab7cc94b24242747dff70a87d107b555c0f7372403660`.
 
 1. Put the new kernel's `drivers/hwmon/asus-ec-sensors.c` in `upstream/`.
 2. `patch -o src/asus-ec-sensors-btf.c upstream/asus-ec-sensors.c < patch/0001-btf-gc-hpwr.patch`
