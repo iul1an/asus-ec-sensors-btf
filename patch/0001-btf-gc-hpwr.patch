@@ -1,5 +1,5 @@
 diff --git a/upstream/asus-ec-sensors.c b/src/asus-ec-sensors-btf.c
-index e43645e..7e59211 100644
+index e43645e..72a3922 100644
 --- a/upstream/asus-ec-sensors.c
 +++ b/src/asus-ec-sensors-btf.c
 @@ -19,6 +19,7 @@
@@ -159,28 +159,52 @@ index e43645e..7e59211 100644
  	return 0;
  }
  
-@@ -1214,6 +1278,35 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
+@@ -1214,6 +1278,64 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
  	return ec_write(ASUS_EC_BANK_REGISTER, bank);
  }
  
++/*
++ * The EC updates a pin's value between our byte reads, so a high byte read
++ * before the low byte can belong to the old value (0x00f8 -> 0x0100 would
++ * read as 0x0000). h2 is the high byte read again after the low byte. If it
++ * rose, a low byte below 0x80 was read after the change; if it fell, one of
++ * 0x80 or more was. Such a low byte goes with h2, any other with h1.
++ */
++static u8 gc_hpwr_pair_high(u8 h1, u8 lo, u8 h2)
++{
++	if (h2 > h1 && lo < 0x80)
++		return h2;
++	if (h2 < h1 && lo >= 0x80)
++		return h2;
++	return h1;
++}
++
 +/* Select a GC-HPWR channel, read its two data registers, check the select held */
 +static int asus_ec_gc_hpwr_read(const struct device *dev,
 +				struct ec_sensors_data *ec, int ireg)
 +{
 +	u8 channel = ec->selects[ireg];
-+	u8 readback;
++	u8 reg_hi = register_index(ec->registers[ireg]);
++	u8 h1, lo, h2, readback;
 +
 +	if (ec_write(ASUS_EC_GC_HPWR_SELECT_REGISTER, channel)) {
 +		dev_warn(dev, "EC GC-HPWR channel select failed");
 +		return -EIO;
 +	}
-+	if (ec_read(register_index(ec->registers[ireg]),
-+		    ec->read_buffer + ireg) ||
-+	    ec_read(register_index(ec->registers[ireg + 1]),
-+		    ec->read_buffer + ireg + 1)) {
++	if (ec_read(reg_hi, &h1) ||
++	    ec_read(register_index(ec->registers[ireg + 1]), &lo) ||
++	    ec_read(reg_hi, &h2)) {
 +		dev_warn_ratelimited(dev, "EC GC-HPWR channel %u data read failed",
 +				     channel);
 +		return -EIO;
++	}
++	/* a pin changing to or from no reading (0xfff8 up) has none this time */
++	if (h1 != h2 && (h1 == 0xff || h2 == 0xff)) {
++		ec->read_buffer[ireg] = 0xff;
++		ec->read_buffer[ireg + 1] = 0xff;
++	} else {
++		ec->read_buffer[ireg] = gc_hpwr_pair_high(h1, lo, h2);
++		ec->read_buffer[ireg + 1] = lo;
 +	}
 +	if (ec_read(ASUS_EC_GC_HPWR_SELECT_REGISTER, &readback) ||
 +	    readback != channel) {
@@ -189,13 +213,18 @@ index e43645e..7e59211 100644
 +				     channel);
 +		return -EIO;
 +	}
++	if (h1 != h2)
++		dev_dbg(dev,
++			"GC-HPWR torn read: channel %u h1 0x%02x lo 0x%02x h2 0x%02x -> 0x%04x",
++			channel, h1, lo, h2,
++			(ec->read_buffer[ireg] << 8) | ec->read_buffer[ireg + 1]);
 +	return 0;
 +}
 +
  static int asus_ec_block_read(const struct device *dev,
  			      struct ec_sensors_data *ec)
  {
-@@ -1227,10 +1320,15 @@ static int asus_ec_block_read(const struct device *dev,
+@@ -1227,10 +1349,15 @@ static int asus_ec_block_read(const struct device *dev,
  		return status;
  	}
  
@@ -215,7 +244,7 @@ index e43645e..7e59211 100644
  	}
  
  	/* read registers minimizing bank switches. */
-@@ -1240,7 +1338,8 @@ static int asus_ec_block_read(const struct device *dev,
+@@ -1240,7 +1367,8 @@ static int asus_ec_block_read(const struct device *dev,
  			if (asus_ec_bank_switch(bank, NULL)) {
  				dev_warn(dev, "EC bank switch to %d failed",
  					 bank);
@@ -225,7 +254,7 @@ index e43645e..7e59211 100644
  			}
  		}
  		for (ireg = 0; ireg < ec->nr_registers; ireg++) {
-@@ -1248,13 +1347,31 @@ static int asus_ec_block_read(const struct device *dev,
+@@ -1248,13 +1376,31 @@ static int asus_ec_block_read(const struct device *dev,
  			if (reg_bank != bank) {
  				continue;
  			}
@@ -259,7 +288,7 @@ index e43645e..7e59211 100644
  }
  
  static inline s32 get_sensor_value(const struct ec_sensor_info *si, u8 *data)
-@@ -1335,12 +1452,13 @@ static int get_cached_value_or_update(const struct device *dev,
+@@ -1335,12 +1481,13 @@ static int get_cached_value_or_update(const struct device *dev,
  				      struct ec_sensors_data *state, s32 *value)
  {
  	if (time_after64(get_jiffies_64(), state->next_update)) {
@@ -277,7 +306,7 @@ index e43645e..7e59211 100644
  
  	*value = state->sensors[sensor_index].cached_value;
  	return 0;
-@@ -1380,6 +1498,15 @@ static int asus_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
+@@ -1380,6 +1527,15 @@ static int asus_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
  	if (ret)
  		return ret;
  
@@ -293,7 +322,7 @@ index e43645e..7e59211 100644
  	sensor_info = get_sensor_info(state, sidx);
  	if (sensor_info->type == hwmon_temp) {
  		ec_sensor = get_ec_sensor_type(state, sidx);
-@@ -1449,7 +1576,7 @@ static const struct ec_board_info *get_board_info(void)
+@@ -1449,7 +1605,7 @@ static const struct ec_board_info *get_board_info(void)
  {
  	const struct dmi_system_id *dmi_entry;
  
@@ -302,7 +331,7 @@ index e43645e..7e59211 100644
  	return dmi_entry ? dmi_entry->driver_data : NULL;
  }
  
-@@ -1538,8 +1665,10 @@ static int asus_ec_probe(struct platform_device *pdev)
+@@ -1538,8 +1694,10 @@ static int asus_ec_probe(struct platform_device *pdev)
  					  sizeof(u16), GFP_KERNEL);
  	ec_data->read_buffer = devm_kcalloc(dev, ec_data->nr_registers,
  					    sizeof(u8), GFP_KERNEL);
@@ -314,7 +343,7 @@ index e43645e..7e59211 100644
  		return -ENOMEM;
  
  	fill_ec_registers(ec_data);
-@@ -1588,11 +1717,11 @@ static int asus_ec_probe(struct platform_device *pdev)
+@@ -1588,11 +1746,11 @@ static int asus_ec_probe(struct platform_device *pdev)
  	return PTR_ERR_OR_ZERO(hwdev);
  }
  
@@ -328,7 +357,7 @@ index e43645e..7e59211 100644
  	},
  	.probe = asus_ec_probe,
  };
-@@ -1626,5 +1755,5 @@ MODULE_PARM_DESC(mutex_path,
+@@ -1626,5 +1784,5 @@ MODULE_PARM_DESC(mutex_path,
  
  MODULE_AUTHOR("Eugene Shalygin <eugene.shalygin@gmail.com>");
  MODULE_DESCRIPTION(

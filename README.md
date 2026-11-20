@@ -12,20 +12,32 @@ each of the six 12 V pins of the GC-HPWR connector of the BTF graphics slot.
 |---|---|---|
 | temp1..temp5 | CPU, CPU Package, Motherboard, T_Sensor, VRM | 0x30, 0x31, 0x32, 0x36, 0x33 |
 | fan1 | CPU_Opt | 0xb0..0xb1 |
-| curr1..curr6 | GC-HPWR pin 1..6 | write channel 0..5 to 0xd8, read 0xd9 (high), 0xda (low) |
+| curr1..curr6 | GC-HPWR pin 1..6 | write channel 0..5 to 0xd8, read 0xd9 (high), 0xda (low), 0xd9 again |
 
 T_Sensor gives `ENODATA` when no probe is plugged in (a raw reading of
 -62, -60 or -40 °C), as upstream does since Linux 7.3.
 
 A pin's current is a big-endian 16-bit value in mA; 0xfff8 and above
-means no reading and gives `ENODATA`. After each read the driver reads
-0xd8 back, and if another EC user changed the channel the whole update
-fails with `EIO`. All reads run under the ACPI global lock, at most once
-a second; the event handlers of this board's firmware hold the same
-lock around their EC bank switches. The kernel log names the guard when
-the module loads. A failed EC read stops the update at once, and every
-sensor then returns `EIO` until an update succeeds again; the driver
-tries again at most once a second.
+means no reading and gives `ENODATA`. The EC updates the value while it
+is read, so the driver reads 0xd9 again after 0xda. If the high byte
+changed, the low byte goes with the new high byte when it lies on the
+new value's side of the boundary (below 0x80 when the value rose, 0x80
+or above when it fell), and with the old high byte otherwise. If the
+high byte changed to or from 0xff, the pin gives `ENODATA` for that
+update, since the EC switched between a value and no reading. Each such
+read is logged to the kernel log as a `GC-HPWR torn read` debug line
+once dynamic debug is turned on (`-p` turns it off):
+
+    echo 'module asus_ec_sensors_btf +p' | sudo tee /sys/kernel/debug/dynamic_debug/control
+
+After each read the driver reads 0xd8 back, and if another EC user
+changed the channel the whole update fails with `EIO`. All reads run
+under the ACPI global lock, at most once a second; the event handlers
+of this board's firmware hold the same lock around their EC bank
+switches. The kernel log names the guard when the module loads. A
+failed EC read stops the update at once, and every sensor then returns
+`EIO` until an update succeeds again; the driver tries again at most
+once a second.
 
 The EC bank found before a read is restored after it. A bank other
 than 0 is reported once in the kernel log with its value, and again
@@ -48,12 +60,12 @@ rebase.
 Arch package, which DKMS builds for every installed kernel:
 
     make package
-    sudo pacman -U dist/asus-ec-sensors-btf-dkms-0.1.2-1-x86_64.pkg.tar.zst
+    sudo pacman -U dist/asus-ec-sensors-btf-dkms-0.1.3-1-x86_64.pkg.tar.zst
 
 DKMS by hand:
 
-    sudo install -Dm644 -t /usr/src/asus-ec-sensors-btf-0.1.2 dkms.conf src/Makefile src/asus-ec-sensors-btf.c
-    sudo dkms install asus-ec-sensors-btf/0.1.2
+    sudo install -Dm644 -t /usr/src/asus-ec-sensors-btf-0.1.3 dkms.conf src/Makefile src/asus-ec-sensors-btf.c
+    sudo dkms install asus-ec-sensors-btf/0.1.3
 
 The module loads at boot through the board's DMI alias. To load it now
 and check it:

@@ -1278,24 +1278,48 @@ static int asus_ec_bank_switch(u8 bank, u8 *old)
 	return ec_write(ASUS_EC_BANK_REGISTER, bank);
 }
 
+/*
+ * The EC updates a pin's value between our byte reads, so a high byte read
+ * before the low byte can belong to the old value (0x00f8 -> 0x0100 would
+ * read as 0x0000). h2 is the high byte read again after the low byte. If it
+ * rose, a low byte below 0x80 was read after the change; if it fell, one of
+ * 0x80 or more was. Such a low byte goes with h2, any other with h1.
+ */
+static u8 gc_hpwr_pair_high(u8 h1, u8 lo, u8 h2)
+{
+	if (h2 > h1 && lo < 0x80)
+		return h2;
+	if (h2 < h1 && lo >= 0x80)
+		return h2;
+	return h1;
+}
+
 /* Select a GC-HPWR channel, read its two data registers, check the select held */
 static int asus_ec_gc_hpwr_read(const struct device *dev,
 				struct ec_sensors_data *ec, int ireg)
 {
 	u8 channel = ec->selects[ireg];
-	u8 readback;
+	u8 reg_hi = register_index(ec->registers[ireg]);
+	u8 h1, lo, h2, readback;
 
 	if (ec_write(ASUS_EC_GC_HPWR_SELECT_REGISTER, channel)) {
 		dev_warn(dev, "EC GC-HPWR channel select failed");
 		return -EIO;
 	}
-	if (ec_read(register_index(ec->registers[ireg]),
-		    ec->read_buffer + ireg) ||
-	    ec_read(register_index(ec->registers[ireg + 1]),
-		    ec->read_buffer + ireg + 1)) {
+	if (ec_read(reg_hi, &h1) ||
+	    ec_read(register_index(ec->registers[ireg + 1]), &lo) ||
+	    ec_read(reg_hi, &h2)) {
 		dev_warn_ratelimited(dev, "EC GC-HPWR channel %u data read failed",
 				     channel);
 		return -EIO;
+	}
+	/* a pin changing to or from no reading (0xfff8 up) has none this time */
+	if (h1 != h2 && (h1 == 0xff || h2 == 0xff)) {
+		ec->read_buffer[ireg] = 0xff;
+		ec->read_buffer[ireg + 1] = 0xff;
+	} else {
+		ec->read_buffer[ireg] = gc_hpwr_pair_high(h1, lo, h2);
+		ec->read_buffer[ireg + 1] = lo;
 	}
 	if (ec_read(ASUS_EC_GC_HPWR_SELECT_REGISTER, &readback) ||
 	    readback != channel) {
@@ -1304,6 +1328,11 @@ static int asus_ec_gc_hpwr_read(const struct device *dev,
 				     channel);
 		return -EIO;
 	}
+	if (h1 != h2)
+		dev_dbg(dev,
+			"GC-HPWR torn read: channel %u h1 0x%02x lo 0x%02x h2 0x%02x -> 0x%04x",
+			channel, h1, lo, h2,
+			(ec->read_buffer[ireg] << 8) | ec->read_buffer[ireg + 1]);
 	return 0;
 }
 
